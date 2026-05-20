@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "sessionId": "a071cd90-e841-4180-a059-66a4de4a8c85",
+  "sessionId": "4e0ea83a-76aa-4532-8e7e-6c56bc300889",
   "workspaceRoot": "/home/hatch/workspace/galaga-vr",
-  "pid": 52496,
+  "pid": 7311,
   "port": 8081,
   "localUrl": "https://localhost:8081/",
   "networkUrls": [
@@ -16,13 +16,13 @@
     "status": "launch_failed",
     "connected": false,
     "connectedClientCount": 0,
-    "lastTransitionAt": "2026-05-19T20:40:45.591Z",
+    "lastTransitionAt": "2026-05-20T00:14:04.195Z",
     "lastError": {
       "cause": "browser_launch_failed",
       "message": "browserType.launch: Executable doesn't exist at /home/hatch/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell\n╔═════════════════════════════════════════════════════════════════════════╗\n║ Looks like Playwright Test or Playwright was just installed or updated. ║\n║ Please run the following command to download new browsers:              ║\n║                                                                         ║\n║     npx playwright install                                              ║\n║                                                                         ║\n║ <3 Playwright Team                                                      ║\n╚═════════════════════════════════════════════════════════════════════════╝",
-      "at": "2026-05-19T20:40:45.591Z"
+      "at": "2026-05-20T00:14:04.195Z"
     }
   },
   "registeredAt": "2026-05-19T20:32:57.976Z",
-  "updatedAt": "2026-05-19T20:40:45.593Z"
+  "updatedAt": "2026-05-20T00:14:04.196Z"
 }
