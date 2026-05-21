@@ -46,12 +46,18 @@ export class ShootingSystem extends createSystem({
   private lastSpaceDown = false;
   private isXRMode = false;
   private timeSlow = false;
+  private xrManaged = false;
 
   // For stats
   totalShotsFired = 0;
 
   setTimeSlow(slow: boolean) {
     this.timeSlow = slow;
+  }
+
+  /** When true, this system skips its own XR trigger detection — the XRInputManager in index.ts is authoritative. */
+  setXRManaged(managed: boolean) {
+    this.xrManaged = managed;
   }
 
   update(delta: number) {
@@ -77,18 +83,20 @@ export class ShootingSystem extends createSystem({
       }
     }
 
-    // Check XR controller triggers
+    // Check XR controller triggers — skip when XRInputManager is handling XR input
     const input = this.world.input;
     if (!input) return;
 
     // Try action-backed input (0.4.0+)
     const actions = (input as any).actions;
     if (actions) {
-      const selectPressed = actions.getButtonPressed("interaction.select");
-      if (selectPressed && !this.lastTriggerRight) {
-        this.fireFromController("right");
+      if (!this.xrManaged) {
+        const selectPressed = actions.getButtonPressed("interaction.select");
+        if (selectPressed && !this.lastTriggerRight) {
+          this.fireFromController("right");
+        }
+        this.lastTriggerRight = !!selectPressed;
       }
-      this.lastTriggerRight = !!selectPressed;
 
       // Check if we're in XR
       this.isXRMode = true;
@@ -99,31 +107,33 @@ export class ShootingSystem extends createSystem({
     const xrInput = (input as any).xr ?? input;
     const gamepads = xrInput?.gamepads;
     if (gamepads && typeof gamepads[Symbol.iterator] === "function") {
-      try {
-        for (const [hand, gamepad] of gamepads) {
-          if (!gamepad) continue;
-          const buttons = gamepad.buttons;
-          if (!buttons || buttons.length === 0) continue;
+      if (!this.xrManaged) {
+        try {
+          for (const [hand, gamepad] of gamepads) {
+            if (!gamepad) continue;
+            const buttons = gamepad.buttons;
+            if (!buttons || buttons.length === 0) continue;
 
-          const triggerValue = buttons[0]?.value ?? 0;
-          const triggerPressed = triggerValue > 0.5;
-          const lastTrigger = hand === "left" ? this.lastTriggerLeft : this.lastTriggerRight;
+            const triggerValue = buttons[0]?.value ?? 0;
+            const triggerPressed = triggerValue > 0.5;
+            const lastTrigger = hand === "left" ? this.lastTriggerLeft : this.lastTriggerRight;
 
-          if (triggerPressed && !lastTrigger) {
-            this.fireFromController(hand);
+            if (triggerPressed && !lastTrigger) {
+              this.fireFromController(hand);
+            }
+
+            if (hand === "left") {
+              this.lastTriggerLeft = triggerPressed;
+            } else {
+              this.lastTriggerRight = triggerPressed;
+            }
           }
-
-          if (hand === "left") {
-            this.lastTriggerLeft = triggerPressed;
-          } else {
-            this.lastTriggerRight = triggerPressed;
-          }
+        } catch (e) {
+          // Not in XR
         }
-        this.isXRMode = true;
-        return;
-      } catch (e) {
-        // Not in XR
       }
+      this.isXRMode = true;
+      return;
     }
 
     // Browser-first input: keyboard + mouse
@@ -157,6 +167,13 @@ export class ShootingSystem extends createSystem({
   /** Called from browser click handler */
   onBrowserClick() {
     this.fireFromBrowser();
+  }
+
+  /** Called from XR input manager with pre-computed aim */
+  fireFromXR(position: Vector3, direction: Vector3) {
+    _pos.copy(position);
+    _dir.copy(direction);
+    this.doFire(_pos, _dir);
   }
 
   private fireFromBrowser() {
@@ -297,8 +314,8 @@ export class ShootingSystem extends createSystem({
     }
   }
 
-  /** Fire homing from Q key or power-up */
-  fireHomingMissile() {
+  /** Fire homing from Q key or power-up. Optional aim overrides camera. */
+  fireHomingMissile(aimPos?: Vector3, aimDir?: Vector3) {
     for (const shooter of this.queries.shooters.entities) {
       const ammo = shooter.getValue(ShooterTag, "homingAmmo");
       if (ammo <= 0) return;
@@ -308,18 +325,23 @@ export class ShootingSystem extends createSystem({
         shooter.setValue(ShooterTag, "homingMissile", false);
       }
 
-      // Get aim direction
-      const camera = (this.world as any).camera;
-      if (camera) {
-        camera.updateWorldMatrix(true, false);
-        _pos.setFromMatrixPosition(camera.matrixWorld);
-        _dir.set(0, 0, -1);
-        _quat.setFromRotationMatrix(camera.matrixWorld);
-        _dir.applyQuaternion(_quat);
-        _dir.normalize();
+      if (aimPos && aimDir) {
+        _pos.copy(aimPos);
+        _dir.copy(aimDir);
       } else {
-        _pos.set(0, 1.5, 0);
-        _dir.set(0, 0, -1);
+        // Get aim direction from camera
+        const camera = (this.world as any).camera;
+        if (camera) {
+          camera.updateWorldMatrix(true, false);
+          _pos.setFromMatrixPosition(camera.matrixWorld);
+          _dir.set(0, 0, -1);
+          _quat.setFromRotationMatrix(camera.matrixWorld);
+          _dir.applyQuaternion(_quat);
+          _dir.normalize();
+        } else {
+          _pos.set(0, 1.5, 0);
+          _dir.set(0, 0, -1);
+        }
       }
 
       this.spawnHoming(_pos, _dir, 2);
@@ -329,8 +351,8 @@ export class ShootingSystem extends createSystem({
     }
   }
 
-  /** Fire mega blast from E key or power-up */
-  fireMegaBlast() {
+  /** Fire mega blast from E key or power-up. Optional aim overrides camera. */
+  fireMegaBlast(aimPos?: Vector3, aimDir?: Vector3) {
     for (const shooter of this.queries.shooters.entities) {
       const charges = shooter.getValue(ShooterTag, "megaBlastCharges");
       if (charges <= 0) return;
@@ -340,17 +362,22 @@ export class ShootingSystem extends createSystem({
         shooter.setValue(ShooterTag, "megaBlastReady", false);
       }
 
-      const camera = (this.world as any).camera;
-      if (camera) {
-        camera.updateWorldMatrix(true, false);
-        _pos.setFromMatrixPosition(camera.matrixWorld);
-        _dir.set(0, 0, -1);
-        _quat.setFromRotationMatrix(camera.matrixWorld);
-        _dir.applyQuaternion(_quat);
-        _dir.normalize();
+      if (aimPos && aimDir) {
+        _pos.copy(aimPos);
+        _dir.copy(aimDir);
       } else {
-        _pos.set(0, 1.5, 0);
-        _dir.set(0, 0, -1);
+        const camera = (this.world as any).camera;
+        if (camera) {
+          camera.updateWorldMatrix(true, false);
+          _pos.setFromMatrixPosition(camera.matrixWorld);
+          _dir.set(0, 0, -1);
+          _quat.setFromRotationMatrix(camera.matrixWorld);
+          _dir.applyQuaternion(_quat);
+          _dir.normalize();
+        } else {
+          _pos.set(0, 1.5, 0);
+          _dir.set(0, 0, -1);
+        }
       }
 
       this.spawnMegaBlast(_pos, _dir);

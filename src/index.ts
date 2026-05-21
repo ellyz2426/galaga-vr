@@ -34,12 +34,13 @@ import {
   createPauseOverlay,
   type ShopUpgrade,
 } from "./ui";
-import { initAudio, playPlayerHitSound as playPlayerHitSoundDirect, playNewHighScoreSound } from "./audio";
+import { initAudio, playPlayerHitSound as playPlayerHitSoundDirect, playNewHighScoreSound, setMasterVolume } from "./audio";
 import {
   createCrosshair,
   createStatusDisplay,
   createDamageVignette,
   createControlsHelp,
+  createFPSDisplay,
 } from "./hud";
 import {
   createNebulaClouds,
@@ -54,8 +55,21 @@ import { EnemyProjectileSystem, EnemyBulletTag } from "./enemy-projectiles";
 import { createCRTOverlay } from "./crt";
 import { createScreenTransition } from "./transitions";
 import { createRadar } from "./radar";
+import { startMusic, stopMusic, setMusicIntensity, setMusicVolume } from "./music";
+import { createSettingsMenu, getSettings, type GameSettings } from "./settings";
+import { createStatsScreen, updateCumulativeStats } from "./stats";
+import { createBombSystem } from "./bomb";
+import { createChallengeHUD, getChallengeForWave, shouldTriggerChallenge } from "./challenge";
+import { createLoadingScreen } from "./loading";
+import { FPSCounter } from "./pool";
+import { XRInputManager } from "./xr-input";
 
 const container = document.getElementById("scene-container") as HTMLDivElement;
+
+// Show loading screen immediately
+const loadingScreen = createLoadingScreen();
+loadingScreen.show();
+loadingScreen.setProgress(5, 'Detecting hardware...');
 
 // Detect if XR is available
 async function detectXR(): Promise<boolean> {
@@ -70,7 +84,13 @@ async function detectXR(): Promise<boolean> {
 }
 
 async function main() {
+  loadingScreen.setProgress(10, 'Checking XR support...');
   const xrAvailable = await detectXR();
+
+  loadingScreen.setProgress(20, 'Creating world...');
+
+  // Load settings
+  const settings = getSettings();
 
   // Create world - supports both XR and browser-first
   const worldOptions: any = {
@@ -106,6 +126,8 @@ async function main() {
   const world = await World.create(container, worldOptions);
   const { scene } = world;
 
+  loadingScreen.setProgress(40, 'Building scene...');
+
   // ============================
   // SCENE SETUP
   // ============================
@@ -129,7 +151,6 @@ async function main() {
   farLight.position.set(0, 2, -20);
   scene.add(farLight);
 
-  // Additional accent lights
   const leftAccent = new PointLight(0x0044ff, 0.8, 12);
   leftAccent.position.set(-3, 1, -10);
   scene.add(leftAccent);
@@ -137,6 +158,8 @@ async function main() {
   const rightAccent = new PointLight(0x0044ff, 0.8, 12);
   rightAccent.position.set(3, 1, -10);
   scene.add(rightAccent);
+
+  loadingScreen.setProgress(50, 'Generating environment...');
 
   // Starfield
   const starfield = createStarfield();
@@ -150,7 +173,7 @@ async function main() {
   const dustParticles = createDustParticles();
   scene.add(dustParticles.points);
 
-  // Speed lines (for time slow effect)
+  // Speed lines
   const speedLines = createSpeedLines();
   scene.add(speedLines.points);
 
@@ -167,10 +190,12 @@ async function main() {
   scene.add(tunnel);
   const tunnelAnimator = createTunnelAnimator(tunnel);
 
+  loadingScreen.setProgress(60, 'Setting up HUD...');
+
   // Scoreboard
   const { group: scoreGroup, updateScore } = createScoreboard();
   scene.add(scoreGroup);
-  scoreGroup.visible = false; // Hidden until game starts
+  scoreGroup.visible = false;
 
   // Boss health bar
   const bossHealthBar = createBossHealthBar();
@@ -212,6 +237,24 @@ async function main() {
   const pauseOverlay = createPauseOverlay();
   scene.add(pauseOverlay.group);
 
+  // Settings menu
+  const settingsMenu = createSettingsMenu();
+  scene.add(settingsMenu.group);
+
+  // Stats screen
+  const statsScreen = createStatsScreen();
+  scene.add(statsScreen.group);
+
+  // Challenge HUD
+  const challengeHUD = createChallengeHUD();
+  scene.add(challengeHUD.group);
+
+  // Bomb system
+  const bombSystem = createBombSystem();
+  scene.add(bombSystem.group);
+
+  loadingScreen.setProgress(70, 'Initializing HUD elements...');
+
   // HUD elements
   const crosshair = createCrosshair();
   scene.add(crosshair.group);
@@ -233,9 +276,10 @@ async function main() {
   scene.add(achievementPopup.group);
   const achievementTracker = new AchievementTracker(achievementPopup);
 
-  // CRT overlay (retro scanlines)
+  // CRT overlay
   const crtOverlay = createCRTOverlay();
   scene.add(crtOverlay.mesh);
+  crtOverlay.mesh.visible = settings.crtEnabled;
 
   // Screen transitions
   const transition = createScreenTransition();
@@ -245,10 +289,24 @@ async function main() {
   const radar = createRadar();
   scene.add(radar.group);
 
-  // Track extra game stats for achievements
+  // FPS counter
+  const fpsCounter = new FPSCounter();
+  const fpsDisplay = createFPSDisplay();
+  scene.add(fpsDisplay.group);
+  if (settings.showFPS) fpsDisplay.show();
+
+  // XR Input Manager
+  const xrInput = new XRInputManager();
+  scene.add(xrInput.laserGroup);
+
+  // Track extra game stats
   let bossesKilled = 0;
   let powerUpsCollected = 0;
   let perfectWavesCount = 0;
+  let creditsSpent = 0;
+  let isPaused = false;
+
+  loadingScreen.setProgress(80, 'Registering systems...');
 
   // ============================
   // REGISTER SYSTEMS
@@ -279,19 +337,36 @@ async function main() {
   const shootingSystem = world.getSystem(ShootingSystem);
   const enemyProjSystem = world.getSystem(EnemyProjectileSystem);
 
-  // Wire enemy projectile hits to game system
+  // Wire enemy projectile hits
   enemyProjSystem.onPlayerHit = () => {
     const scoreSystem2 = world.getSystem(ScoreSystem);
     if (!scoreSystem2) return;
     scoreSystem2.resetCombo();
     playPlayerHitSoundDirect();
-    screenShake.trigger(0.08);
+    if (settings.screenShake) screenShake.trigger(0.08);
     hitFlash.flash(0xff0000);
     const lives = scoreSystem2.loseLife();
     if (lives <= 0) {
       gameSystem.gameOver();
     }
   };
+
+  loadingScreen.setProgress(90, 'Configuring audio...');
+
+  // ============================
+  // APPLY SETTINGS
+  // ============================
+
+  function applySettings(s: GameSettings) {
+    setMasterVolume(s.sfxVolume * s.masterVolume);
+    setMusicVolume(s.musicVolume * s.masterVolume);
+    crtOverlay.mesh.visible = s.crtEnabled;
+    if (s.showFPS) fpsDisplay.show();
+    else fpsDisplay.hide();
+  }
+
+  applySettings(settings);
+  settingsMenu.onSettingsChanged = applySettings;
 
   // ============================
   // GAME CALLBACKS
@@ -303,6 +378,7 @@ async function main() {
         case GameState.Title:
           titleScreen.show();
           scoreGroup.visible = false;
+          setMusicIntensity(0);
           break;
         case GameState.Playing:
           titleScreen.hide();
@@ -312,15 +388,18 @@ async function main() {
           pauseOverlay.hide();
           scoreGroup.visible = true;
           transition.fadeOut(0x000000, 0.3);
+          setMusicIntensity(1);
           break;
         case GameState.GameOver:
           transition.flash(0xff0022, 0.5);
+          setMusicIntensity(3);
           break;
         case GameState.Shop:
           transition.flash(0x001133, 0.3);
           break;
         case GameState.BossIntro:
           transition.flash(0x220000, 0.4);
+          setMusicIntensity(2);
           break;
       }
     },
@@ -328,14 +407,12 @@ async function main() {
       waveBanner.show(text, subtext, color);
       tunnelPulse.triggerPulse(color);
 
-      // Track perfect waves (wave clear with no enemies passing = perfect)
       if (text === "WAVE CLEAR!") {
-        // We check via the game system — if we get WAVE CLEAR it means it completed
         perfectWavesCount++;
       }
-      // Track boss kills
       if (text === "BOSS DESTROYED!") {
         bossesKilled++;
+        setMusicIntensity(1); // Back to normal after boss
       }
     },
     onComboPopup: (combo: number, points: number) => {
@@ -348,7 +425,6 @@ async function main() {
       bossIntroScreen.show(name, level);
     },
     onGameOver: (data: any) => {
-      // Save high score
       const hsResult = saveHighScore(
         data.score,
         data.wave,
@@ -356,19 +432,34 @@ async function main() {
         data.maxCombo,
         data.timePlayed
       );
-      // Augment game over data with high score info
       data.rank = hsResult.rank;
       data.isNewHighScore = hsResult.isNewHighScore;
       data.highScoreTable = formatHighScoreTable();
       gameOverScreen.show(data);
 
-      // Play celebration sound for new high score
       if (hsResult.isNewHighScore) {
         setTimeout(() => playNewHighScoreSound(), 500);
       }
+
+      // Update cumulative stats
+      updateCumulativeStats({
+        score: data.score,
+        wave: data.wave,
+        kills: data.kills,
+        shotsFired: shootingSystem.totalShotsFired,
+        shotsHit: 0,
+        maxCombo: data.maxCombo,
+        timePlayed: data.timePlayed,
+        bossesKilled,
+        powerUpsCollected,
+        creditsSpent,
+      });
+
+      // Stop music
+      stopMusic();
     },
     onScreenShake: (intensity: number) => {
-      screenShake.trigger(intensity);
+      if (settings.screenShake) screenShake.trigger(intensity);
     },
     onHitFlash: (color: number) => {
       hitFlash.flash(color);
@@ -384,40 +475,56 @@ async function main() {
     },
   });
 
+  loadingScreen.setProgress(100, 'Ready!');
+  setTimeout(() => loadingScreen.hide(), 400);
+
   // ============================
   // INPUT HANDLING
   // ============================
 
   let gameStarted = false;
-  let pendingRestart = false;
 
-  // Initialize audio system on first interaction
   initAudio();
 
-  // Click/touch handler for browser-first mode
+  // Click/touch handler
   function handleInteraction() {
     const state = gameSystem.getState();
+
+    // Close overlays first
+    if (settingsMenu.isVisible()) {
+      settingsMenu.hide();
+      return;
+    }
+    if (statsScreen.isVisible()) {
+      statsScreen.hide();
+      return;
+    }
 
     if (state === GameState.Title && !gameStarted) {
       gameStarted = true;
       controlsHelp.show(!xrAvailable);
       gameSystem.startGame();
+      startMusic();
+      setMusicIntensity(1);
       return;
     }
 
     if (state === GameState.Playing) {
-      // Fire weapon
       shootingSystem.onBrowserClick();
       return;
     }
 
     if (state === GameState.Shop) {
-      // Purchase selected item
       handleShopPurchase();
       return;
     }
 
     if (state === GameState.GameOver) {
+      gameStarted = false;
+      bossesKilled = 0;
+      powerUpsCollected = 0;
+      perfectWavesCount = 0;
+      creditsSpent = 0;
       gameSystem.restartGame();
       return;
     }
@@ -431,23 +538,64 @@ async function main() {
 
   // Keyboard handler
   document.addEventListener("keydown", (e) => {
+    // Settings menu takes priority
+    if (settingsMenu.isVisible()) {
+      if (settingsMenu.handleKey(e.code)) {
+        e.preventDefault();
+        return;
+      }
+    }
+
+    if (statsScreen.isVisible()) {
+      if (e.code === 'Escape' || e.code === 'Space') {
+        statsScreen.hide();
+        return;
+      }
+    }
+
     const state = gameSystem.getState();
 
     if (state === GameState.Title && !gameStarted) {
       if (e.code === "Space" || e.code === "Enter") {
         gameStarted = true;
         gameSystem.startGame();
+        startMusic();
+        setMusicIntensity(1);
+        return;
+      }
+      // Tab for settings on title screen
+      if (e.code === "Tab") {
+        e.preventDefault();
+        settingsMenu.show();
+        return;
+      }
+      // S for stats on title screen
+      if (e.code === "KeyS") {
+        statsScreen.show();
         return;
       }
     }
 
     if (state === GameState.Playing) {
       if (e.code === "Escape") {
-        // Pause (simple implementation)
+        isPaused = !isPaused;
+        if (isPaused) {
+          pauseOverlay.show(false); // keyboard: not XR
+        } else {
+          pauseOverlay.hide();
+        }
         return;
       }
       if (e.code === "Space") {
-        shootingSystem.onBrowserClick();
+        if (!isPaused) shootingSystem.onBrowserClick();
+        return;
+      }
+      // Bomb (F key)
+      if (e.code === "KeyF") {
+        if (bombSystem.canFire()) {
+          bombSystem.fire();
+          // Kill all enemies on screen — handled in frame loop
+        }
         return;
       }
     }
@@ -468,34 +616,176 @@ async function main() {
 
     if (state === GameState.GameOver) {
       if (e.code === "Space" || e.code === "Enter") {
+        gameStarted = false;
+        bossesKilled = 0;
+        powerUpsCollected = 0;
+        perfectWavesCount = 0;
+        creditsSpent = 0;
         gameSystem.restartGame();
       }
     }
   });
 
-  // XR trigger handler — watch for trigger on title/game over screens
-  let lastXRTrigger = false;
-
-  function checkXRTriggerForUI() {
-    const input = world.input;
-    if (!input) return;
-
-    const actions = (input as any).actions;
-    if (!actions) return;
-
-    const selectPressed = actions.getButtonPressed("interaction.select");
-    if (selectPressed && !lastXRTrigger) {
-      const state = gameSystem.getState();
-      if (state === GameState.Title && !gameStarted) {
-        gameStarted = true;
-        gameSystem.startGame();
-      } else if (state === GameState.GameOver) {
-        gameSystem.restartGame();
-      } else if (state === GameState.Shop) {
-        handleShopPurchase();
-      }
+  // XR trigger handler — now uses XRInputManager
+  function handleXRInput() {
+    if (!xrInput.state.isXR) {
+      shootingSystem.setXRManaged(false);
+      return;
     }
-    lastXRTrigger = !!selectPressed;
+
+    // Tell ShootingSystem that XR input is handled here — don't double-fire
+    shootingSystem.setXRManaged(true);
+
+    const state = gameSystem.getState();
+    const ri = xrInput.state.right;
+    const li = xrInput.state.left;
+    const nav = xrInput.state;
+
+    // ── Settings menu takes priority over everything ──
+    if (settingsMenu.isVisible()) {
+      settingsMenu.handleXRNav({
+        up: nav.menuUp,
+        down: nav.menuDown,
+        left: nav.menuLeft,
+        right: nav.menuRight,
+        select: nav.menuSelect,
+        back: nav.menuBack,
+      });
+      return;
+    }
+
+    // ── Stats screen: dismiss on trigger or B ──
+    if (statsScreen.isVisible()) {
+      if (ri.triggerJustPressed || li.triggerJustPressed || nav.menuBack) {
+        statsScreen.hide();
+        xrInput.triggerHaptic(world, 'right', 0.1, 15);
+      }
+      return;
+    }
+
+    // ── Title state ──
+    if (state === GameState.Title && !gameStarted) {
+      // Trigger: start game
+      if (ri.triggerJustPressed || li.triggerJustPressed) {
+        gameStarted = true;
+        controlsHelp.show(false); // VR controls
+        gameSystem.startGame();
+        startMusic();
+        setMusicIntensity(1);
+        xrInput.triggerHaptic(world, 'right', 0.3, 30);
+        return;
+      }
+      // A button: open settings
+      if (ri.buttonA) {
+        settingsMenu.show();
+        xrInput.triggerHaptic(world, 'right', 0.1, 15);
+        return;
+      }
+      // Thumbstick down: open stats
+      if (nav.menuDown) {
+        statsScreen.show();
+        xrInput.triggerHaptic(world, 'right', 0.1, 15);
+        return;
+      }
+      return;
+    }
+
+    // ── Playing state ──
+    if (state === GameState.Playing) {
+      // B button: toggle pause
+      if (nav.menuBack) {
+        isPaused = !isPaused;
+        if (isPaused) {
+          pauseOverlay.show(true); // VR-aware text
+        } else {
+          pauseOverlay.hide();
+        }
+        xrInput.triggerHaptic(world, 'right', 0.15, 20);
+        return;
+      }
+
+      if (isPaused) return; // Don't process gameplay input while paused
+
+      // Trigger: fire primary weapon (either hand)
+      if (ri.triggerJustPressed || li.triggerJustPressed) {
+        const hand = ri.triggerJustPressed ? 'right' : 'left';
+        const hs = hand === 'right' ? ri : li;
+        if (hs.aimValid) {
+          shootingSystem.fireFromXR(hs.aimPosition, hs.aimDirection);
+          xrInput.triggerHaptic(world, hand, 0.15, 25);
+          xrInput.flashLaser(hand);
+        }
+      }
+
+      // Right grip: fire homing missile (using controller aim)
+      if (ri.gripJustPressed) {
+        const aim = xrInput.getBestAim(world);
+        shootingSystem.fireHomingMissile(aim.position, aim.direction);
+        xrInput.triggerHaptic(world, 'right', 0.4, 40);
+      }
+
+      // Left grip: fire bomb
+      if (li.gripJustPressed) {
+        if (bombSystem.canFire()) {
+          bombSystem.fire();
+          xrInput.triggerHaptic(world, 'left', 0.6, 80);
+        }
+      }
+
+      // A button: fire mega blast (using controller aim)
+      if (ri.buttonA) {
+        const aim = xrInput.getBestAim(world);
+        shootingSystem.fireMegaBlast(aim.position, aim.direction);
+        xrInput.triggerHaptic(world, 'right', 0.5, 60);
+      }
+      return;
+    }
+
+    // ── Shop state ──
+    if (state === GameState.Shop) {
+      if (nav.menuUp) {
+        shopScreen.setSelectedIndex(shopScreen.getSelectedIndex() - 1);
+        xrInput.triggerHaptic(world, 'right', 0.1, 15);
+      }
+      if (nav.menuDown) {
+        shopScreen.setSelectedIndex(shopScreen.getSelectedIndex() + 1);
+        xrInput.triggerHaptic(world, 'right', 0.1, 15);
+      }
+      if (nav.menuSelect || ri.triggerJustPressed) {
+        handleShopPurchase();
+        xrInput.triggerHaptic(world, 'right', 0.2, 20);
+      }
+      if (nav.menuBack) {
+        shopScreen.hide();
+        gameSystem.closeShop();
+        xrInput.triggerHaptic(world, 'right', 0.15, 20);
+      }
+      return;
+    }
+
+    // ── Boss intro: trigger skips ──
+    if (state === GameState.BossIntro) {
+      if (ri.triggerJustPressed || li.triggerJustPressed || nav.menuSelect) {
+        bossIntroScreen.hide();
+        gameSystem.skipBossIntro();
+        xrInput.triggerHaptic(world, 'right', 0.2, 25);
+      }
+      return;
+    }
+
+    // ── Game Over: trigger restarts ──
+    if (state === GameState.GameOver) {
+      if (ri.triggerJustPressed || li.triggerJustPressed) {
+        gameStarted = false;
+        bossesKilled = 0;
+        powerUpsCollected = 0;
+        perfectWavesCount = 0;
+        creditsSpent = 0;
+        gameSystem.restartGame();
+        xrInput.triggerHaptic(world, 'right', 0.3, 30);
+      }
+      return;
+    }
   }
 
   function handleShopPurchase() {
@@ -509,33 +799,27 @@ async function main() {
     const score = scoreSystem.getScore();
     if (score < upgrade.cost) return;
 
+    creditsSpent += upgrade.cost;
     gameSystem.purchaseUpgrade(upgrade.id, upgrade.cost);
 
-    // Update shop display
     upgrade.currentLevel++;
     const newScore = scoreSystem.getScore();
-    shopScreen.show(newScore, upgrades, 0); // Refresh
+    shopScreen.show(newScore, upgrades, 0);
     shopScreen.setSelectedIndex(idx);
   }
 
   // ============================
-  // FRAME LOOP ADDITIONS
+  // FRAME LOOP
   // ============================
 
-  // Hook into world's frame loop for extra updates
   let lastTime = 0;
   let entityCleanupTimer = 0;
 
-  // Cleanup function to remove dead entities from the scene
   function cleanupDeadEntities() {
     const projSystem2 = world.getSystem(ProjectileSystem);
     const enemySystem = world.getSystem(EnemySystem);
     const enemyProjSystem2 = world.getSystem(EnemyProjectileSystem);
 
-    // Count for debugging
-    let cleaned = 0;
-
-    // Clean dead projectiles
     for (const proj of projSystem2.queries.projectiles.entities) {
       if (!proj.getValue(ProjectileTag, "alive")) {
         const obj = proj.object3D;
@@ -544,22 +828,18 @@ async function main() {
           if ((obj as any).geometry) (obj as any).geometry.dispose();
           if ((obj as any).material) (obj as any).material.dispose();
         }
-        cleaned++;
       }
     }
 
-    // Clean dead enemies
     for (const enemy of enemySystem.queries.enemies.entities) {
       if (!enemy.getValue(EnemyTag, "alive")) {
         const obj = enemy.object3D;
         if (obj) {
           obj.removeFromParent();
         }
-        cleaned++;
       }
     }
 
-    // Clean dead enemy bullets
     for (const bullet of enemyProjSystem2.queries.bullets.entities) {
       if (!bullet.getValue(EnemyBulletTag, "alive")) {
         const obj = bullet.object3D;
@@ -568,75 +848,129 @@ async function main() {
           if ((obj as any).geometry) (obj as any).geometry.dispose();
           if ((obj as any).material) (obj as any).material.dispose();
         }
-        cleaned++;
       }
     }
   }
 
-  const originalRequestAnimationFrame = window.requestAnimationFrame;
-
-  // We'll use a simple approach - add a pre-render callback
   const frameHook = () => {
     const now = performance.now() / 1000;
     const delta = lastTime > 0 ? Math.min(now - lastTime, 0.1) : 0.016;
     lastTime = now;
 
-    // Update effects
-    waveBanner.update(delta);
-    comboPopup.update(delta);
-    hitFlash.update(delta);
-    tunnelAnimator.update(delta, now);
-    crosshair.update(delta, now);
-    controlsHelp.update(delta);
+    // Update FPS counter
+    const fps = fpsCounter.update(now);
+    fpsDisplay.update(fps, fpsCounter.getAvgFPS());
 
-    // Update damage vignette based on lives
-    const currentLives = scoreSystem.getLives();
-    damageVignette.update(currentLives, 3);
+    // Skip updates if paused
+    if (!isPaused) {
+      // Update effects
+      waveBanner.update(delta);
+      comboPopup.update(delta);
+      hitFlash.update(delta);
+      tunnelAnimator.update(delta, now);
+      crosshair.update(delta, now);
+      controlsHelp.update(delta);
 
-    // Update status display
-    if (shootingSystem) {
-      let homingAmmo = 0;
-      let megaCharges = 0;
-      for (const s of shootingSystem.queries.shooters.entities) {
-        homingAmmo = s.getValue(ShooterTag, "homingAmmo") || 0;
-        megaCharges = s.getValue(ShooterTag, "megaBlastCharges") || 0;
-        break;
+      // Update damage vignette
+      const currentLives = scoreSystem.getLives();
+      damageVignette.update(currentLives, 3);
+
+      // Update status display with bomb charges
+      if (shootingSystem) {
+        let homingAmmo = 0;
+        let megaCharges = 0;
+        for (const s of shootingSystem.queries.shooters.entities) {
+          homingAmmo = s.getValue(ShooterTag, "homingAmmo") || 0;
+          megaCharges = s.getValue(ShooterTag, "megaBlastCharges") || 0;
+          break;
+        }
+        const bombState = bombSystem.getState();
+        const bombText = bombState.charges > 0 ? `💣${bombState.charges}` : '';
+        statusDisplay.update(homingAmmo, megaCharges, bombText, gameSystem.getWave(), currentLives);
       }
-      statusDisplay.update(homingAmmo, megaCharges, "", gameSystem.getWave(), currentLives);
+
+      // Bomb system update
+      bombSystem.update(delta, now);
+
+      // If bomb is animating, check for enemy kills
+      if (bombSystem.isAnimating()) {
+        const blastRadius = bombSystem.getBlastRadius();
+        if (blastRadius > 0) {
+          const enemySystem = world.getSystem(EnemySystem);
+          for (const entity of enemySystem.queries.enemies.entities) {
+            const alive = entity.getValue(EnemyTag, "alive");
+            if (!alive) continue;
+            const obj = entity.object3D;
+            if (!obj) continue;
+
+            // Check if enemy is within blast radius (rough distance check)
+            const dist = Math.abs(obj.position.z + 2); // Distance from blast center at z=-2
+            if (dist < blastRadius * 0.8) {
+              entity.setValue(EnemyTag, "alive", false);
+              entity.setValue(EnemyTag, "health", 0);
+              obj.visible = false;
+
+              // Give score
+              const points = entity.getValue(EnemyTag, "points");
+              scoreSystem.addScore(points);
+
+              // Spawn debris
+              const debrisSystem = world.getSystem(DebrisSystem);
+              if (debrisSystem) {
+                debrisSystem.spawnExplosion(
+                  obj.position.x, obj.position.y, obj.position.z,
+                  0x00ffff
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // Update challenge HUD
+      challengeHUD.update(delta, now);
     }
 
-    // Title/GameOver screen updates
+    // Update UI screens (even when paused for animations)
     titleScreen.update(delta, now);
     gameOverScreen.update(delta, now);
     shopScreen.update(delta, now);
     bossIntroScreen.update(delta, now);
     pauseOverlay.update(delta, now);
+    settingsMenu.update(delta, now);
+    statsScreen.update(delta, now);
 
     // Screen shake
-    const shakeOffset = screenShake.update(delta);
-    if (shakeOffset.lengthSq() > 0) {
-      scene.position.copy(shakeOffset);
-    } else {
-      scene.position.set(0, 0, 0);
+    if (!isPaused) {
+      const shakeOffset = screenShake.update(delta);
+      if (shakeOffset.lengthSq() > 0) {
+        scene.position.copy(shakeOffset);
+      } else {
+        scene.position.set(0, 0, 0);
+      }
     }
 
     // Slow starfield rotation
     starfield.rotation.y += delta * 0.01;
 
     // CRT overlay
-    crtOverlay.update(now);
+    if (settings.crtEnabled) {
+      crtOverlay.update(now);
+    }
 
     // Screen transitions
     transition.update(delta);
 
     // Atmosphere updates
-    dustParticles.update(delta, now);
-    speedLines.update(delta);
-    tunnelPulse.update(delta, now);
-    floatingScores.update(delta);
-    achievementPopup.update(delta);
+    if (!isPaused) {
+      dustParticles.update(delta, now);
+      speedLines.update(delta);
+      tunnelPulse.update(delta, now);
+      floatingScores.update(delta);
+      achievementPopup.update(delta);
+    }
 
-    // Radar update — collect enemy positions
+    // Radar update
     if (gameSystem.getState() === GameState.Playing || gameSystem.getState() === GameState.WaveTransition) {
       const enemySystem = world.getSystem(EnemySystem);
       const enemyData: Array<{ x: number; y: number; z: number; type: number; alive: boolean }> = [];
@@ -658,16 +992,18 @@ async function main() {
     }
 
     // Update achievement tracker
-    achievementTracker.updateStats({
-      score: scoreSystem.getScore(),
-      kills: scoreSystem.getTotalKills(),
-      maxCombo: scoreSystem.getMaxCombo(),
-      wave: gameSystem.getWave(),
-      bossesKilled: bossesKilled,
-      powerUpsCollected: powerUpsCollected,
-      timePlayed: gameSystem.getGameTime(),
-      perfectWaves: perfectWavesCount,
-    });
+    if (!isPaused) {
+      achievementTracker.updateStats({
+        score: scoreSystem.getScore(),
+        kills: scoreSystem.getTotalKills(),
+        maxCombo: scoreSystem.getMaxCombo(),
+        wave: gameSystem.getWave(),
+        bossesKilled: bossesKilled,
+        powerUpsCollected: powerUpsCollected,
+        timePlayed: gameSystem.getGameTime(),
+        perfectWaves: perfectWavesCount,
+      });
+    }
 
     // Update enemy projectile system with player position
     const camera = (world as any).camera;
@@ -676,15 +1012,16 @@ async function main() {
       enemyProjSystem.playerPos.setFromMatrixPosition(camera.matrixWorld);
     }
 
-    // Entity cleanup — remove dead entities every ~2 seconds to prevent accumulation
+    // Entity cleanup
     entityCleanupTimer += delta;
     if (entityCleanupTimer > 2.0) {
       entityCleanupTimer = 0;
       cleanupDeadEntities();
     }
 
-    // XR trigger check for UI
-    checkXRTriggerForUI();
+    // XR input update + handling
+    xrInput.update(world, delta);
+    handleXRInput();
 
     requestAnimationFrame(frameHook);
   };

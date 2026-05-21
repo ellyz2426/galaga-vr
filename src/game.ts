@@ -58,6 +58,10 @@ function getWaveConfig(wave: number): WaveConfig {
     FormationType.SpiralDive,
     FormationType.Diamond,
     FormationType.Flanking,
+    FormationType.Zigzag,
+    FormationType.Circle,
+    FormationType.Cross,
+    FormationType.Pincer,
   ];
   const waveFormation = formations[wave % formations.length];
 
@@ -1000,6 +1004,14 @@ export class GameSystem extends createSystem({
   /** Called from UI when shop is closed */
   closeShop() {
     this.nextWave();
+  }
+
+  /** Skip the boss intro animation and immediately spawn the boss */
+  skipBossIntro() {
+    if (this.state === GameState.BossIntro) {
+      this.waveDelay = 0;
+      this.spawnBoss();
+    }
   }
 
   gameOver() {

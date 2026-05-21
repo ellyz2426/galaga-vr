@@ -127,7 +127,12 @@ export function createTitleScreen(): {
     const instY = storedHighScore > 0 ? 275 : 260;
     ctx.fillText("VR: Pull trigger to fire", 512, instY);
     ctx.fillText("Desktop: Click/Space to fire, WASD to move", 512, instY + 30);
-    ctx.fillText("Q = Homing Missile  |  E = Mega Blast", 512, instY + 60);
+    ctx.fillText("Q = Homing  |  E = Mega Blast  |  F = Bomb", 512, instY + 60);
+
+    // Menu options
+    ctx.fillStyle = "#556688";
+    ctx.font = "18px monospace";
+    ctx.fillText("[TAB] Settings  |  [S] Statistics", 512, instY + 100);
 
     // Blinking start prompt
     const blink = Math.sin(time * 3) > 0;
@@ -724,7 +729,7 @@ export function createBossIntroScreen(): {
 
 export function createPauseOverlay(): {
   group: Group;
-  show: () => void;
+  show: (isXR?: boolean) => void;
   hide: () => void;
   update: (delta: number, time: number) => void;
 } {
@@ -748,6 +753,8 @@ export function createPauseOverlay(): {
   const textMesh = new Mesh(textGeo, textMat);
   group.add(textMesh);
 
+  let vrMode = false;
+
   function render(time: number) {
     ctx.clearRect(0, 0, 512, 256);
 
@@ -764,13 +771,14 @@ export function createPauseOverlay(): {
     if (blink) {
       ctx.fillStyle = "#888899";
       ctx.font = "20px monospace";
-      ctx.fillText("Press ESC to resume", 256, 180);
+      ctx.fillText(vrMode ? "Press B to resume" : "Press ESC to resume", 256, 180);
     }
 
     texture.needsUpdate = true;
   }
 
-  function show() {
+  function show(isXR?: boolean) {
+    vrMode = !!isXR;
     group.visible = true;
     render(0);
   }
